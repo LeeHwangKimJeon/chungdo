@@ -1,7 +1,7 @@
 # TRD — 취준·이직 파이프라인 보드
 
 ## 저장소·환경 확인 (2026-11-05)
-- 저장소에는 현재 `AGENTS.md`, `PRD.md`, `TRD.md`, `TDD.md` 기획 문서가 있으며 앱 구현과 Aspire AppHost는 아직 없다.
+- 저장소에는 `frontend/` React + TypeScript + Vite 앱과 `AGENTS.md`, `PRD.md`, `TRD.md`, `TDD.md` 기획 문서가 있으며 Aspire AppHost는 아직 없다.
 - 확인된 도구: Node.js 24.18.0, npm 11.16.0, Python 3.9.6, Docker. 확인되지 않은 도구: .NET SDK, Azure CLI(`az`), Aspire CLI. Copilot Python SDK는 Python 3.11 이상을 요구하므로 Python도 업그레이드해야 한다. 이 환경에서 Azure 배포를 실행할 수 없다.
 - 사용 가능한 skills 목록에 Azure 전용 skill이 없어 적용하지 않았다.
 - [해커톤 참가 안내](https://github.com/hackersground-kr/hackathon-cheongdo/blob/main/README.md), [평가 기준](https://github.com/hackersground-kr/hackathon-cheongdo/blob/main/judgement/judgement-criteria.md), [청도 사회문제 브리핑](https://github.com/hackersground-kr/hackathon-cheongdo/blob/main/references/cheongdo-social-issues.md)을 확인했다. 안내는 청년 취업·창업 지원을 참고 주제로 제시하고, 로그인 없는 심사 가능성과 Azure 기본 도메인 배포를 요구한다. 평가 가중치는 SDK+Agent Framework 25%, 생산성·문제 적합성 18%, Azure 18%, 완성도 16%, UX 12%, 책임 있는 AI·보안 6%, 혁신성 5%다.
@@ -14,7 +14,8 @@
 - 참고: [Copilot SDK](https://github.com/github/copilot-sdk), [Microsoft Agent Framework](https://learn.microsoft.com/en-us/agent-framework/overview/), [Aspire 배포 모델](https://aspire.dev/deployment/deploy-with-aspire/).
 
 ## 제안 아키텍처
-- **웹:** React + TypeScript. 보드, URL 검토/수정 화면, 반응형 상태 표현.
+- **웹:** React + TypeScript + Vite. 좌측 내비게이션과 상단 보드 경로, 요약 카드, 8열 칸반 보드, URL 검토/수정 모달, 분석 중·AI 결과 검토·가져오기 실패 상태, 공고 상세 패널, 일정·자소서 메모 화면으로 구성한다. 데스크톱은 고정 사이드바와 가로 보드를 사용하고, 640px 이하에서는 내비게이션·요약 카드를 재배치하고 보드를 가로 스크롤한다.
+- **시각 시스템:** 밝은 회색 캔버스(`#f3f4f6`), 흰색 카드, 네이비 블루 액션 컬러(`#2f3e99`), 얇은 회색 경계선과 작은 라운드 카드로 구성한다. 주황색은 임박한 마감일과 같은 경고성 정보에만 사용한다.
 - **API/에이전트:** Python 3.11 이상, Flask, Microsoft Agent Framework Python package, Copilot SDK Python package. Flask는 API와 React 빌드 정적 파일을 한 서비스로 제공한다. 비동기 에이전트 실행·Copilot SDK 이벤트 전달을 서버 스트리밍(SSE)으로 연결한다. Flask의 WSGI 요청 수명과 SDK의 asyncio 이벤트 스트림을 안전하게 연결하는 방식은 P0에서 검증한다.
 - **에이전트·도구:** 공고 분석과 근거 검증 역할을 별도 agent로 구성한다. `fetchPosting`만 등록하고 사용자 확인 전에는 저장 도구를 노출하지 않는다.
 - **데이터:** 계정 없이 공개 심사가 가능하도록 사용자별 지원 보드와 자소서 버전 메모는 브라우저 `localStorage`에 저장한다. 공고 URL과 추출 결과는 서버에 영구 저장하지 않는다. 기기 간 동기화·복구는 MVP에서 지원하지 않는다.
@@ -28,9 +29,17 @@
 
 ## 구현 단계
 1. **P0 검증:** Python 3.11+/Flask/MAF Python/Copilot SDK Python 조합의 실제 도구 호출, 두 agent 역할, 스트리밍과 Flask 비동기 연결을 검증한다. 별도로 .NET 기반 Aspire AppHost의 Azure Container Apps target 및 컨테이너 배포를 확인한다. 미지원이면 중단하고 기술 결정을 갱신한다.
-2. **P1 보드:** 저장소 모델/API, 상태 칸반, 일정·버전 편집과 단위/통합 테스트.
+2. **P1 보드:** 현재 프론트 프로토타입은 브라우저 `localStorage` 기반 보드, 검색, 드래그 이동, 일정·자소서 메모 화면과 공고 추가 모달을 제공한다. 다음 단계에서 저장소 모델/API, 실제 일정·버전 편집과 단위/통합 테스트를 연결한다.
 3. **P2 에이전트 흐름:** 안전한 URL 가져오기, 근거가 있는 추출·검증, SSE 상태, 사용자 확인 및 실패 경로.
 4. **P3 배포:** Aspire `deploy`, Azure Container Apps/비밀값 주입/Application Insights 설정, Azure 기본 도메인 배포·헬스·오류 확인. 필수 CLI와 Azure 구독 권한이 확보될 때 수행한다.
 
 ## 운영상 제약
 `localStorage`는 브라우저·기기 간 동기화와 서버 복구를 제공하지 않으며, 브라우저 데이터를 지우면 저장 항목이 사라진다. 심사 환경에서 민감한 개인 정보를 입력하지 않도록 안내한다. 개발 환경의 Python 3.9.6은 SDK 최소 요구 버전보다 낮고, Aspire AppHost 실행에 필요한 .NET/Azure 도구도 설치되어 있지 않다. 배포 검증 전에는 Azure 배포 완료를 주장하지 않는다. SDK 런타임, 모델 공급자 인증, Flask 스트리밍, 익명 요청 제한과 관찰성은 실제 환경에서 검증한다.
+
+## 프론트엔드 구현 상태
+- 피그마 `Design - 청도바이브코딩 해커톤`의 데스크톱 지원 보드와 모바일 보드 구성을 기준으로 레이아웃을 정리했다.
+- 현재 `frontend/src/App.tsx`는 8개 지원 단계, 공고 카드, 검색, 드래그 이동, 공고 분석 검토 모달, 일정, 자소서 메모 화면을 포함한다.
+- 공고 추가 흐름은 `idle` 입력, `loading` 분석 중, `success` AI 결과 검토, `error` 가져오기 실패 상태를 구분하며 실패 시 직접 입력 또는 재시도를 제공한다.
+- 공고 카드를 선택하면 상세 패널에서 진행 단계를 변경하고 지원 마감·면접 일정·자소서 버전 메모를 확인할 수 있다. 일정과 버전 추가는 현재 안내 토스트를 제공하는 프로토타입 연결 상태다.
+- 현재 `frontend/src/style.css`는 데스크톱 고정 사이드바와 모바일 가로 스크롤 보드, 포인트 컬러·카드·상태·모달 토큰을 정의한다.
+- 이 단계의 분석은 데모용 지연과 샘플 결과를 사용하므로 실제 서버 에이전트 연동으로 간주하지 않는다.
