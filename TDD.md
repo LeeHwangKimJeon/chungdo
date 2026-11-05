@@ -8,18 +8,18 @@
 **대안:** 일반 할 일/대학생 플래너는 타깃 문제에 덜 맞고, 자동 지원은 오작동 영향과 권한 범위가 커 MVP에서 제외한다.
 
 ## 결정 2: Copilot SDK와 Agent Framework를 함께 검증한다
-**선택:** MAF workflow가 공고 분석·근거 검증 단계를 조정하고 Copilot SDK 세션의 도구 호출과 스트리밍을 연결하는 .NET 어댑터를 P0에서 검증한다.
+**선택:** MAF Python workflow가 공고 분석·근거 검증 단계를 조정하고 Copilot SDK Python 세션의 도구 호출과 스트리밍을 연결하는 Flask 애플리케이션을 P0에서 검증한다.
 
 **이유:** 제품 요구의 다중 에이전트 협업, SDK 실제 사용, 투명한 진행 상태를 하나의 흐름에서 보여 준다. 공식 문서에서 두 framework 간 직접 통합은 확인하지 못했으므로 검증 전 구현을 확대하지 않는다.
 
 **대안:** Copilot SDK만 사용하면 통합 위험은 낮지만 MAF 요구를 충족하지 못한다. Foundry/다른 모델 SDK만 쓰면 필수 Copilot SDK 사용이 아니다. P0 실패 시 사용자 확인 없이 어느 대안도 채택하지 않는다.
 
-## 결정 3: .NET 서버와 Aspire 배포 target
-**선택:** MAF와 Copilot SDK .NET 패키지를 한 ASP.NET Core 서버에서 사용하고, Aspire AppHost로 Azure App Service에 배포한다. 개인 지원 보드 데이터는 브라우저 `localStorage`에 저장하고, Application Insights는 운영 관찰성에 사용한다.
+## 결정 3: Flask 서버와 Aspire 컨테이너 배포
+**선택:** React 정적 빌드와 Flask API를 단일 컨테이너로 구성하고, Python MAF와 Copilot SDK를 실행한다. Aspire AppHost에서 Azure Container Apps에 배포하고 Application Insights로 운영을 관찰한다. 개인 지원 보드 데이터는 브라우저 `localStorage`에 저장한다.
 
-**이유:** 해커톤 심사자는 로그인 없이 핵심 흐름을 사용해야 한다. 사용자 데이터는 브라우저에 남겨 계정·서버 데이터베이스 없이 공개 심사를 지원하고, 단일 사용자 앱에 불필요한 Azure 리소스를 추가하지 않는다. Azure 기본 도메인과 실제 `aspire deploy`를 검증한다.
+**이유:** 사용자가 선호하는 Flask를 API 서버로 쓰면서 Python용 MAF와 Copilot SDK를 같은 런타임에서 검증할 수 있다. 정적 프론트와 API를 한 컨테이너로 묶으면 공개 심사 경로와 배포 구성을 단순화한다. Azure Container Apps는 컨테이너형 Python 서비스를 배포하기 적합하다. 브라우저 저장은 로그인과 데이터베이스 없이 공개 심사를 지원한다.
 
-**대안:** Azure SQL은 다중 기기 동기화에 유리하지만 계정/사용자 분리 없이 공용 저장을 제공하면 개인 지원 정보가 노출될 수 있고, 해커톤 MVP에 운영 구성도 늘어난다. `localStorage`는 브라우저·기기 간 동기화와 데이터 복구가 안 되며, 이를 MVP 제한으로 명시한다. TypeScript 서버는 Copilot SDK를 사용할 수 있지만 공식 MAF .NET/Python/Go 경로와 별도 서비스 경계가 생긴다. Container Apps도 Aspire 지원 target이지만 단일 웹 앱에는 App Service를 우선한다.
+**대안:** ASP.NET Core 서버는 .NET 생태계로 통일할 수 있지만 사용자의 Flask 선호와 맞지 않는다. Azure App Service도 대안이나, Container Apps에서는 컨테이너 이미지로 Python 런타임과 정적 파일 구성을 고정할 수 있다. 단, Aspire AppHost 자체는 .NET 프로젝트이므로 배포 도구 체인에 .NET SDK가 필요하다. `localStorage`는 기기 간 동기화·복구를 제공하지 않는 제한을 가진다.
 
 ## 결정 4: 사람 확인 및 안전한 URL 가져오기
 **선택:** 에이전트는 공고를 읽고 근거를 제안할 뿐 저장하지 않는다. 사용자가 수정·확인한 뒤 앱 API가 기록한다. 공개 HTTPS 페이지에만 제한된 fetch 도구를 사용하고 실패하면 수동 입력을 제공한다.
