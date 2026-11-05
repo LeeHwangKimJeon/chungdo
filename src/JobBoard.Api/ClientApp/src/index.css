@@ -1,0 +1,49 @@
+:root {
+  font-family: Inter, Pretendard, "Noto Sans KR", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #23322a;
+  background: #fbfcfa;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-weight: 400;
+  --ink: #23322a;
+  --muted: #748078;
+  --green: #2f8056;
+  --green-dark: #226442;
+  --green-pale: #eaf3ed;
+  --surface: #fff;
+  --border: #e5eae5;
+  --border-strong: #d7dfd8;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-optical-sizing: auto;
+  font-size: 14px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+a {
+  color: inherit;
+}
+
+::selection {
+  background: #cce5d5;
+}

@@ -8,16 +8,16 @@
 **대안:** 일반 할 일/대학생 플래너는 타깃 문제에 덜 맞고, 자동 지원은 오작동 영향과 권한 범위가 커 MVP에서 제외한다.
 
 ## 결정 2: Copilot SDK와 Agent Framework를 함께 검증한다
-**선택:** MAF workflow가 공고 분석·근거 검증 단계를 조정하고 Copilot SDK 세션의 도구 호출과 스트리밍을 연결하는 .NET 어댑터를 P0에서 검증한다.
+**선택:** MAF workflow가 공고 분석·근거 검증 단계를 조정하고 Copilot SDK 세션의 도구 호출과 스트리밍을 연결하는 .NET 어댑터를 사용한다.
 
-**이유:** 제품 요구의 다중 에이전트 협업, SDK 실제 사용, 투명한 진행 상태를 하나의 흐름에서 보여 준다. 공식 문서에서 두 framework 간 직접 통합은 확인하지 못했으므로 검증 전 구현을 확대하지 않는다.
+**이유 및 검증 결과 (2026-11-05):** .NET SDK 10.0.403, Copilot SDK 1.0.28, Agent Framework Workflows 1.27.0으로 실제 도구 호출과 스트리밍을 확인했고, MAF custom executor가 Copilot SDK 세션을 순차 실행하는 proof가 통과했다. 저장소 구현도 이 조합을 사용한다. 이는 사용자 정의 연동이며 공식 SDK 간 어댑터가 확인됐다는 뜻은 아니다.
 
 **대안:** Copilot SDK만 사용하면 통합 위험은 낮지만 MAF 요구를 충족하지 못한다. Foundry/다른 모델 SDK만 쓰면 필수 Copilot SDK 사용이 아니다. P0 실패 시 사용자 확인 없이 어느 대안도 채택하지 않는다.
 
 ## 결정 3: .NET 서버와 Aspire 배포 target
-**선택:** MAF와 Copilot SDK .NET 패키지를 한 ASP.NET Core 서버에서 사용하고, Aspire AppHost로 Azure App Service에 배포한다. 개인 지원 보드 데이터는 브라우저 `localStorage`에 저장하고, Application Insights는 운영 관찰성에 사용한다.
+**선택:** MAF와 Copilot SDK .NET 패키지를 한 ASP.NET Core 서버에서 사용하고, Aspire AppHost에 Azure App Service 배포 target을 둔다. 개인 지원 보드 데이터는 브라우저 `localStorage`에 저장하고, Key Vault와 Application Insights를 배포 구성에 포함한다.
 
-**이유:** 해커톤 심사자는 로그인 없이 핵심 흐름을 사용해야 한다. 사용자 데이터는 브라우저에 남겨 계정·서버 데이터베이스 없이 공개 심사를 지원하고, 단일 사용자 앱에 불필요한 Azure 리소스를 추가하지 않는다. Azure 기본 도메인과 실제 `aspire deploy`를 검증한다.
+**이유 및 검증 경계:** 해커톤 심사자는 로그인 없이 핵심 흐름을 사용해야 한다. 사용자 데이터는 브라우저에 남겨 계정·서버 데이터베이스 없이 공개 심사를 지원한다. Aspire 13.6.4의 publish 템플릿 생성은 확인했으나 Azure CLI/구독 권한이 없어 실제 `aspire deploy`, Key Vault 참조 해석, 기본 도메인과 telemetry 수집은 검증되지 않았다.
 
 **대안:** Azure SQL은 다중 기기 동기화에 유리하지만 계정/사용자 분리 없이 공용 저장을 제공하면 개인 지원 정보가 노출될 수 있고, 해커톤 MVP에 운영 구성도 늘어난다. `localStorage`는 브라우저·기기 간 동기화와 데이터 복구가 안 되며, 이를 MVP 제한으로 명시한다. TypeScript 서버는 Copilot SDK를 사용할 수 있지만 공식 MAF .NET/Python/Go 경로와 별도 서비스 경계가 생긴다. Container Apps도 Aspire 지원 target이지만 단일 웹 앱에는 App Service를 우선한다.
 

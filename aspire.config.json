@@ -1,0 +1,5 @@
+{
+  "appHost": {
+    "path": "src/JobBoard.AppHost/JobBoard.AppHost.csproj"
+  }
+}
