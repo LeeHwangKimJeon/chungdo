@@ -20,6 +20,78 @@ type Job = {
   tag: string;
 };
 
+type ExtractedField = {
+  value: string | null;
+  confidence: number;
+  evidence: string | null;
+};
+
+type AnalysisResult = {
+  company: ExtractedField;
+  title: ExtractedField;
+  deadline: ExtractedField;
+  source_url: string;
+  ai_generated: true;
+  needs_review: string[];
+};
+
+type ApiErrorPayload = {
+  error?: {
+    message?: string;
+  };
+};
+
+async function* readServerEvents(
+  stream: ReadableStream<Uint8Array>,
+): AsyncGenerator<{ event: string; data: unknown }> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  function parseBlock(block: string) {
+    let event = "message";
+    const data: string[] = [];
+
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) {
+        event = line.slice(6).trim();
+      } else if (line.startsWith("data:")) {
+        data.push(line.slice(5).trimStart());
+      }
+    }
+
+    if (!data.length) return null;
+    return { event, data: JSON.parse(data.join("\n")) as unknown };
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer = (buffer + (value ? decoder.decode(value, { stream: !done }) : ""))
+        .replace(/\r\n/g, "\n");
+
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const parsed = parseBlock(block);
+        if (parsed) yield parsed;
+        boundary = buffer.indexOf("\n\n");
+      }
+
+      if (done) {
+        if (buffer.trim()) {
+          const parsed = parseBlock(buffer);
+          if (parsed) yield parsed;
+        }
+        return;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 const columns: { id: Stage; label: string }[] = [
   { id: "interest", label: "관심" },
   { id: "preparing", label: "준비 중" },
@@ -96,6 +168,10 @@ function App() {
   const [analysisStatus, setAnalysisStatus] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
+  const [analysisError, setAnalysisError] = useState("");
+  const [analysisProgress, setAnalysisProgress] = useState("");
+  const [analysisEvidence, setAnalysisEvidence] = useState("");
+  const [manualEntry, setManualEntry] = useState(false);
 
   const filteredJobs = useMemo(() => {
     const keyword = search.toLowerCase();
@@ -122,27 +198,93 @@ function App() {
     setTitle("");
     setDeadline("");
     setAnalysisStatus("idle");
+    setAnalysisError("");
+    setAnalysisProgress("");
+    setAnalysisEvidence("");
+    setManualEntry(false);
   }
 
-  function analyzeJob() {
+  async function analyzeJob() {
     if (!url.trim()) {
       notify("공고 URL을 입력해 주세요.");
       return;
     }
 
     setAnalysisStatus("loading");
+    setAnalysisError("");
+    setAnalysisProgress("");
+    setAnalysisEvidence("");
+    setManualEntry(false);
+    setCompany("");
+    setTitle("");
+    setDeadline("");
 
-    setTimeout(() => {
-      if (!url.startsWith("https://")) {
-        setAnalysisStatus("error");
-        return;
+    try {
+      const response = await fetch("/api/v1/postings/analyze", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({ url: url.trim() }),
+      });
+
+      if (!response.ok) {
+        let message = `공고 분석 요청에 실패했습니다. (${response.status})`;
+        try {
+          const payload = (await response.json()) as ApiErrorPayload;
+          message = payload.error?.message || message;
+        } catch {
+          throw new Error(message);
+        }
+        throw new Error(message);
+      }
+      if (!response.body) {
+        throw new Error("분석 스트림을 시작할 수 없습니다. 다시 시도해 주세요.");
       }
 
-      setCompany("오렌지랩");
-      setTitle("콘텐츠 마케터");
-      setDeadline("2024-06-28");
-      setAnalysisStatus("success");
-    }, 1800);
+      let receivedResult = false;
+      for await (const serverEvent of readServerEvents(response.body)) {
+        if (serverEvent.event === "status") {
+          const data = serverEvent.data as { message?: string };
+          setAnalysisProgress(data.message || "공고 정보를 분석하고 있습니다.");
+        } else if (serverEvent.event === "delta") {
+          const data = serverEvent.data as { text?: string };
+          if (data.text) {
+            setAnalysisProgress((current) => `${current}${data.text}`);
+          }
+        } else if (serverEvent.event === "error") {
+          const data = serverEvent.data as { message?: string };
+          throw new Error(data.message || "공고 분석에 실패했습니다.");
+        } else if (serverEvent.event === "result") {
+          const result = serverEvent.data as AnalysisResult;
+          setCompany(result.company.value || "");
+          setTitle(result.title.value || "");
+          setDeadline(result.deadline.value || "");
+          setAnalysisEvidence(
+            [
+              `회사명: ${result.company.evidence || "근거를 확인하지 못했습니다."}`,
+              `공고명: ${result.title.evidence || "근거를 확인하지 못했습니다."}`,
+              `마감일: ${result.deadline.evidence || "공고에서 확인되지 않았습니다."}`,
+            ].join(" · "),
+          );
+          setAnalysisProgress("");
+          setAnalysisStatus("success");
+          receivedResult = true;
+        }
+      }
+
+      if (!receivedResult) {
+        throw new Error("분석 연결이 결과 수신 전에 종료되었습니다. 다시 시도해 주세요.");
+      }
+    } catch (error) {
+      setAnalysisStatus("error");
+      setAnalysisError(
+        error instanceof Error
+          ? error.message
+          : "공고 분석 중 알 수 없는 오류가 발생했습니다.",
+      );
+    }
   }
 
   function saveJob() {
@@ -157,7 +299,7 @@ function App() {
       title,
       deadline,
       stage: "interest",
-      tag: "AI 확인 완료",
+      tag: manualEntry ? "직접 입력" : "AI 확인 완료",
     };
 
     updateJobs([newJob, ...jobs]);
@@ -381,19 +523,20 @@ function App() {
 
             {analysisStatus === "loading" && (
               <div className="status loading">
-                공고 정보를 분석하고 있어요...
+                {analysisProgress || "공고 정보를 분석하고 있어요..."}
               </div>
             )}
 
             {analysisStatus === "error" && (
               <div className="status error">
-                HTTPS 주소만 분석할 수 있어요. 아래에 직접 입력해 주세요.
+                {analysisError} 아래에 직접 입력하거나 URL을 확인하고 다시 시도해 주세요.
                 <button
                   onClick={() => {
                     setAnalysisStatus("success");
-                    setCompany("");
-                    setTitle("");
-                    setDeadline("");
+                  setManualEntry(true);
+                  setCompany("");
+                  setTitle("");
+                  setDeadline("");
                   }}
                 >
                   직접 입력하기
@@ -403,7 +546,9 @@ function App() {
 
             {analysisStatus === "success" && (
               <div className="result">
-                <span>✦ AI 생성 · 확인 필요</span>
+                <span>
+                  {manualEntry ? "직접 입력 · 저장 전 확인" : "✦ AI 생성 · 확인 필요"}
+                </span>
 
                 <label>
                   회사명
@@ -430,9 +575,9 @@ function App() {
                   />
                 </label>
 
-                <p className="evidence">
-                  근거: 공고 본문에서 회사명과 마감일 후보를 찾았습니다.
-                </p>
+                {!manualEntry && (
+                  <p className="evidence">근거: {analysisEvidence}</p>
+                )}
               </div>
             )}
 
