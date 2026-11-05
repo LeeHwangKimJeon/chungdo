@@ -8,22 +8,46 @@ import queue
 import threading
 from collections import defaultdict, deque
 from collections.abc import Iterator
-from typing import Any
+from collections.abc import Awaitable, Callable
+from datetime import date
+from pathlib import Path
+from typing import Any, TypeVar
 
 from flask import Flask, Response, jsonify, request, stream_with_context
+from pydantic import BaseModel, ValidationError
 
-from .agents import AnalysisError, analyze_posting
+from .agents import (
+    AnalysisError,
+    analyze_posting,
+    generate_daily_plan,
+    generate_draft,
+    generate_interview_turn,
+)
+from .contracts import (
+    CuratedPosting,
+    DailyPlanRequest,
+    DraftRequest,
+    InterviewRequest,
+)
 from .security import PostingFetchError, resolve_public_target
 
 
 app = Flask(__name__, static_folder="../frontend/dist", static_url_path="")
-app.config["MAX_CONTENT_LENGTH"] = 4_096
+app.config["MAX_CONTENT_LENGTH"] = 64_000
 logger = logging.getLogger("chungdo.api")
 
 _RATE_LIMIT_WINDOW_SECONDS = 60
 _RATE_LIMIT_REQUESTS = 10
+_AI_OPERATION_TIMEOUT_SECONDS = 120
 _rate_lock = threading.Lock()
 _request_times: dict[str, deque[float]] = defaultdict(deque)
+_CURATED_POSTINGS_PATH = Path(
+    os.getenv(
+        "CURATED_POSTINGS_FILE",
+        str(Path(__file__).parent / "data" / "curated_postings.json"),
+    )
+)
+_ResultT = TypeVar("_ResultT", bound=BaseModel)
 
 
 def _error(code: str, message: str, status: int, retryable: bool = False) -> tuple[Response, int]:
@@ -62,6 +86,131 @@ def _sse(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {data}\n\n"
 
 
+def _validated_request(
+    model: type[_ResultT], *, require_consent: bool = False
+) -> _ResultT | tuple[Response, int]:
+    if not request.is_json:
+        return _error(
+            "UNSUPPORTED_MEDIA_TYPE",
+            "요청은 application/json 형식이어야 합니다.",
+            415,
+        )
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error("INVALID_REQUEST", "JSON 요청 본문이 필요합니다.", 400)
+    try:
+        result = model.model_validate(payload)
+    except ValidationError:
+        return _error(
+            "INVALID_REQUEST",
+            "필수 항목, 글자 수 또는 날짜 형식을 확인해 주세요.",
+            400,
+        )
+    if require_consent and not getattr(result, "consent", False):
+        return _error(
+            "CONSENT_REQUIRED",
+            "AI에 전송할 내용과 범위를 확인하고 동의해 주세요.",
+            400,
+        )
+    return result
+
+
+def _stream_response(
+    *,
+    feature: str,
+    run: Callable[[Any, Callable[[str, dict[str, Any]], None]], Awaitable[Any]],
+    payload: Any,
+) -> Response:
+    events: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue()
+
+    def emit(event: str, data: dict[str, Any]) -> None:
+        events.put((event, data))
+
+    def execute() -> None:
+        emit("status", {"stage": "starting", "message": "에이전트를 준비하고 있습니다."})
+        try:
+            result = asyncio.run(
+                asyncio.wait_for(
+                    run(payload, emit), timeout=_AI_OPERATION_TIMEOUT_SECONDS
+                )
+            )
+            emit("result", result)
+        except TimeoutError:
+            emit(
+                "error",
+                {
+                    "code": "AGENT_TIMEOUT",
+                    "message": "AI 작업 시간이 초과되었습니다. 다시 시도해 주세요.",
+                    "retryable": True,
+                },
+            )
+        except AnalysisError as exc:
+            logger.warning("%s failed code=%s", feature, exc.code)
+            emit(
+                "error",
+                {
+                    "code": exc.code,
+                    "message": exc.message,
+                    "retryable": exc.retryable,
+                },
+            )
+        except Exception:
+            logger.error("%s failed code=AGENT_FAILED", feature)
+            emit(
+                "error",
+                {
+                    "code": "AGENT_FAILED",
+                    "message": "요청을 완료하지 못했습니다. 다시 시도해 주세요.",
+                    "retryable": True,
+                },
+            )
+        finally:
+            events.put(None)
+
+    threading.Thread(target=execute, daemon=True).start()
+
+    @stream_with_context
+    def generate() -> Iterator[str]:
+        while True:
+            item = events.get()
+            if item is None:
+                return
+            event, data = item
+            yield _sse(event, data)
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+def _load_curated_postings() -> list[CuratedPosting]:
+    try:
+        raw_data = json.loads(_CURATED_POSTINGS_PATH.read_text(encoding="utf-8"))
+        if not isinstance(raw_data, list) or len(raw_data) > 500:
+            raise ValueError("Curated posting file must be a list of at most 500 entries.")
+        return [CuratedPosting.model_validate(item) for item in raw_data]
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise AnalysisError(
+            "CURATED_DATA_INVALID",
+            "검증 공고 목록을 읽지 못했습니다. 운영자에게 문의해 주세요.",
+        ) from exc
+
+
+def _recommendation_reason(posting: CuratedPosting, query: str) -> str:
+    if not query:
+        return "운영자가 출처를 확인한 공고입니다."
+    haystack = " ".join(
+        [posting.company, posting.title, *posting.keywords]
+    ).casefold()
+    terms = [term for term in query.casefold().split() if term in haystack]
+    if terms:
+        return f"검색어 '{', '.join(terms)}'가 공고 정보와 일치합니다."
+    return "검증 공고 목록의 공고입니다."
+
+
 @app.get("/api/v1/health")
 def health() -> Response:
     return jsonify(status="ok")
@@ -69,18 +218,19 @@ def health() -> Response:
 
 @app.post("/api/v1/postings/analyze")
 def analyze() -> Response | tuple[Response, int]:
+    if request.content_length and request.content_length > 4_096:
+        return _error(
+            "REQUEST_TOO_LARGE", "요청 본문은 4KB 이하여야 합니다.", 413
+        )
     if not request.is_json:
         return _error(
             "UNSUPPORTED_MEDIA_TYPE",
             "요청은 application/json 형식이어야 합니다.",
             415,
         )
-
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict) or not isinstance(payload.get("url"), str):
-        return _error(
-            "INVALID_REQUEST", "HTTPS 공고 URL을 입력해 주세요.", 400
-        )
+        return _error("INVALID_REQUEST", "HTTPS 공고 URL을 입력해 주세요.", 400)
 
     url = payload["url"].strip()
     if not url:
@@ -101,64 +251,103 @@ def analyze() -> Response | tuple[Response, int]:
         status = 403 if exc.code == "URL_NOT_ALLOWED" else 400
         return _error(exc.code, exc.message, status, exc.retryable)
 
-    events: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue()
+    return _stream_response(
+        feature="posting analysis",
+        run=lambda value, emit: analyze_posting(value, emit),
+        payload=url,
+    )
 
-    def emit(event: str, data: dict[str, Any]) -> None:
-        events.put((event, data))
 
-    def run_analysis() -> None:
-        emit("status", {"stage": "starting", "message": "에이전트를 준비하고 있습니다."})
-        try:
-            result = asyncio.run(analyze_posting(url, emit))
-            emit("result", result)
-        except AnalysisError as exc:
-            logger.warning("posting analysis failed code=%s", exc.code)
-            emit(
-                "error",
-                {
-                    "code": exc.code,
-                    "message": exc.message,
-                    "retryable": exc.retryable,
-                },
-            )
-        except PostingFetchError as exc:
-            logger.warning("posting fetch failed code=%s", exc.code)
-            emit(
-                "error",
-                {
-                    "code": exc.code,
-                    "message": exc.message,
-                    "retryable": exc.retryable,
-                },
-            )
-        except Exception:
-            logger.error("posting analysis failed code=AGENT_FAILED")
-            emit(
-                "error",
-                {
-                    "code": "AGENT_FAILED",
-                    "message": "공고 분석을 완료하지 못했습니다. 다시 시도하거나 직접 입력해 주세요.",
-                    "retryable": True,
-                },
-            )
-        finally:
-            events.put(None)
+@app.get("/api/v1/postings/recommendations")
+def recommendations() -> Response | tuple[Response, int]:
+    query = request.args.get("q", "").strip()
+    location = request.args.get("location", "").strip()
+    if len(query) > 100 or len(location) > 100:
+        return _error(
+            "INVALID_REQUEST", "검색어와 지역은 각각 100자 이하여야 합니다.", 400
+        )
 
-    threading.Thread(target=run_analysis, daemon=True).start()
+    try:
+        postings = _load_curated_postings()
+    except AnalysisError as exc:
+        return _error(exc.code, exc.message, 500)
 
-    @stream_with_context
-    def generate() -> Iterator[str]:
-        while True:
-            item = events.get()
-            if item is None:
-                return
-            event, data = item
-            yield _sse(event, data)
+    today = date.today()
+    results: list[dict[str, Any]] = []
+    for posting in postings:
+        if posting.deadline and posting.deadline < today:
+            continue
+        if location and (
+            not posting.location
+            or location.casefold() not in posting.location.casefold()
+        ):
+            continue
+        search_text = " ".join(
+            [posting.company, posting.title, *posting.keywords]
+        ).casefold()
+        if query and not any(
+            term in search_text for term in query.casefold().split()
+        ):
+            continue
+        result = posting.model_dump(mode="json")
+        result["url"] = str(posting.url)
+        result["reason"] = _recommendation_reason(posting, query)
+        results.append(result)
+    return jsonify(items=results[:50])
 
-    response = Response(generate(), mimetype="text/event-stream")
-    response.headers["Cache-Control"] = "no-cache, no-transform"
-    response.headers["X-Accel-Buffering"] = "no"
-    return response
+
+@app.post("/api/v1/plans/daily")
+def daily_plan() -> Response | tuple[Response, int]:
+    payload = _validated_request(DailyPlanRequest)
+    if isinstance(payload, tuple):
+        return payload
+    if _rate_limited(request.remote_addr or "unknown"):
+        response, status = _error(
+            "RATE_LIMITED", "요청이 잠시 많습니다. 잠시 후 다시 시도해 주세요.", 429, True
+        )
+        response.headers["Retry-After"] = str(_RATE_LIMIT_WINDOW_SECONDS)
+        return response, status
+    return _stream_response(
+        feature="daily plan",
+        run=generate_daily_plan,
+        payload=payload,
+    )
+
+
+@app.post("/api/v1/interviews/turns")
+def interview_turn() -> Response | tuple[Response, int]:
+    payload = _validated_request(InterviewRequest, require_consent=True)
+    if isinstance(payload, tuple):
+        return payload
+    if _rate_limited(request.remote_addr or "unknown"):
+        response, status = _error(
+            "RATE_LIMITED", "요청이 잠시 많습니다. 잠시 후 다시 시도해 주세요.", 429, True
+        )
+        response.headers["Retry-After"] = str(_RATE_LIMIT_WINDOW_SECONDS)
+        return response, status
+    return _stream_response(
+        feature="interview coaching",
+        run=generate_interview_turn,
+        payload=payload,
+    )
+
+
+@app.post("/api/v1/drafts/generate")
+def draft_generate() -> Response | tuple[Response, int]:
+    payload = _validated_request(DraftRequest, require_consent=True)
+    if isinstance(payload, tuple):
+        return payload
+    if _rate_limited(request.remote_addr or "unknown"):
+        response, status = _error(
+            "RATE_LIMITED", "요청이 잠시 많습니다. 잠시 후 다시 시도해 주세요.", 429, True
+        )
+        response.headers["Retry-After"] = str(_RATE_LIMIT_WINDOW_SECONDS)
+        return response, status
+    return _stream_response(
+        feature="document draft",
+        run=generate_draft,
+        payload=payload,
+    )
 
 
 @app.get("/")
