@@ -81,6 +81,7 @@ async def _copilot_completion(
     prompt: str,
     *,
     tools: list[Any],
+    available_tools: list[str],
     emit: StreamEmitter,
 ) -> str:
     try:
@@ -98,7 +99,7 @@ async def _copilot_completion(
 
     options: dict[str, Any] = {
         "tools": tools,
-        "available_tools": [],
+        "available_tools": available_tools,
         "streaming": True,
     }
     model = os.getenv("COPILOT_MODEL")
@@ -186,6 +187,7 @@ class ExtractPosting(Executor):
             await _copilot_completion(
                 prompt,
                 tools=[_create_fetch_tool(self.context)],
+                available_tools=["fetch_posting"],
                 emit=self.context.emit,
             )
         )
@@ -224,7 +226,9 @@ class VerifyPosting(Executor):
             f"Source text:\n{self.context.page_text}"
         )
         await ctx.send_message(
-            await _copilot_completion(prompt, tools=[], emit=self.context.emit)
+            await _copilot_completion(
+                prompt, tools=[], available_tools=[], emit=self.context.emit
+            )
         )
 
 
